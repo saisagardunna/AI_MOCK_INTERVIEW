@@ -1,0 +1,2989 @@
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\app\api\interview\[id]\feedback\route.ts ===
+import { NextResponse } from "next/server"
+import { GoogleGenerativeAI } from "@google/generative-ai"
+import { db, interviews, messages } from "@/lib/db"
+import { eq } from "drizzle-orm"
+
+// Initialize Gemini AI
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "")
+
+export async function GET(request: Request, { params }: { params: { id: string } }) {
+  try {
+    const interviewId = Number.parseInt(params.id)
+
+    // Get conversation history
+    const conversationHistory = await db.query.messages.findMany({
+      where: eq(messages.interviewId, interviewId),
+      orderBy: (messages, { asc }) => [asc(messages.createdAt)],
+    })
+
+    // Get interview details
+    const interview = await db.query.interviews.findFirst({
+      where: eq(interviews.id, interviewId),
+    })
+
+    if (!interview) {
+      return NextResponse.json({ error: "Interview not found" }, { status: 404 })
+    }
+
+    // Format conversation for analysis
+    const conversationText = conversationHistory.map((msg) => `${msg.role.toUpperCase()}: ${msg.content}`).join("\n\n")
+
+    // Generate feedback using Gemini
+    const model = genAI.getGenerativeModel({ model: "gemini-pro" })
+
+    const prompt = `
+      You are an expert technical interviewer evaluating a candidate's performance in a ${interview.type} interview about ${interview.topics.join(", ")}.
+      
+      Below is the interview conversation:
+      
+      ${conversationText}
+      
+      Provide detailed feedback on the candidate's performance with the following structure:
+      1. Strengths (list 3-5 bullet points)
+      2. Areas for Improvement (list 3-5 bullet points)
+      3. Overall Score (a percentage between 0-100%)
+      4. Suggested Resources (2-3 specific learning resources that would help the candidate improve)
+      
+      Format your response as JSON with the following structure:
+      {
+        "strengths": ["point1", "point2", ...],
+        "improvements": ["point1", "point2", ...],
+        "score": 85,
+        "resources": [
+          {"title": "Resource Title", "description": "Brief description"}
+        ]
+      }
+    `
+
+    const result = await model.generateContent(prompt)
+    const feedbackText = result.response.text()
+
+    // Parse the JSON response
+    let feedback
+    try {
+      feedback = JSON.parse(feedbackText)
+    } catch (e) {
+      console.error("Failed to parse feedback JSON:", e)
+      return NextResponse.json({ error: "Failed to generate feedback" }, { status: 500 })
+    }
+
+    // Update the interview with feedback and score
+    await db
+      .update(interviews)
+      .set({
+        feedback: feedbackText,
+        score: feedback.score,
+      })
+      .where(eq(interviews.id, interviewId))
+
+    return NextResponse.json(feedback)
+  } catch (error) {
+    console.error("Error generating feedback:", error)
+    return NextResponse.json({ error: "Failed to generate feedback" }, { status: 500 })
+  }
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\app\api\interview\send video\route.ts ===
+import { type NextRequest, NextResponse } from "next/server"
+import nodemailer from "nodemailer"
+
+export async function POST(request: NextRequest) {
+  try {
+    const formData = await request.formData()
+    const video = formData.get("video") as File
+    const email = formData.get("email") as string
+    const interviewType = formData.get("interviewType") as string
+    const topics = formData.get("topics") as string
+    const duration = formData.get("duration") as string
+
+    if (!video || !email) {
+      return NextResponse.json({ error: "Missing video or email" }, { status: 400 })
+    }
+
+    // Convert video file to buffer
+    const videoBuffer = Buffer.from(await video.arrayBuffer())
+
+    // Create transporter (you'll need to configure this with your email service)
+    const transporter = nodemailer.createTransporter({
+      service: "gmail", // or your preferred email service
+      auth: {
+        user: process.env.EMAIL_USER, // Your email
+        pass: process.env.EMAIL_PASSWORD, // Your email password or app password
+      },
+    })
+
+    // Email content
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: `Interview Recording - ${interviewType} Interview`,
+      html: `
+        <h2>Your Interview Recording</h2>
+        <p>Here's your recorded interview session:</p>
+        <ul>
+          <li><strong>Interview Type:</strong> ${interviewType}</li>
+          <li><strong>Topics Covered:</strong> ${topics}</li>
+          <li><strong>Duration:</strong> ${duration}</li>
+          <li><strong>Date:</strong> ${new Date().toLocaleDateString()}</li>
+        </ul>
+        <p>The video recording is attached to this email.</p>
+        <p>Good luck with your interview preparation!</p>
+        <br>
+        <p>Best regards,<br>InterviewAI Team</p>
+      `,
+      attachments: [
+        {
+          filename: `interview-${interviewType}-${Date.now()}.webm`,
+          content: videoBuffer,
+          contentType: "video/webm",
+        },
+      ],
+    }
+
+    // Send email
+    await transporter.sendMail(mailOptions)
+
+    return NextResponse.json({
+      success: true,
+      message: "Video sent successfully to email",
+    })
+  } catch (error) {
+    console.error("Error sending video email:", error)
+    return NextResponse.json({ error: "Failed to send video email" }, { status: 500 })
+  }
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\app\interview\new\loading.tsx ===
+export default function Loading() {
+  return null
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\app\interview\new\page.tsx ===
+"use client"
+
+import { useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
+import Link from "next/link"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Label } from "@/components/ui/label"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+import { Checkbox } from "@/components/ui/checkbox"
+import { ArrowLeft, Code, Play } from "lucide-react"
+
+export default function NewInterviewPage() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const preselectedType = searchParams.get("type")
+
+  const [selectedType, setSelectedType] = useState(preselectedType || "frontend")
+  const [selectedTopics, setSelectedTopics] = useState<string[]>([])
+  const [difficulty, setDifficulty] = useState("intermediate")
+
+  const interviewTypes = {
+    frontend: {
+      title: "Frontend Developer",
+      description: "Focus on client-side technologies and user interfaces",
+      topics: [
+        "React",
+        "Vue.js",
+        "Angular",
+        "JavaScript",
+        "TypeScript",
+        "CSS",
+        "HTML",
+        "Responsive Design",
+        "Performance Optimization",
+      ],
+    },
+    backend: {
+      title: "Backend Developer",
+      description: "Server-side development and API design",
+      topics: [
+        "Node.js",
+        "Python",
+        "Java",
+        "APIs",
+        "Databases",
+        "Authentication",
+        "Microservices",
+        "Cloud Services",
+        "Security",
+      ],
+    },
+    fullstack: {
+      title: "Full Stack Developer",
+      description: "Both frontend and backend development",
+      topics: [
+        "React",
+        "Node.js",
+        "Databases",
+        "APIs",
+        "DevOps",
+        "System Architecture",
+        "Testing",
+        "Security",
+        "Performance",
+      ],
+    },
+    "system-design": {
+      title: "System Design",
+      description: "Architecture and scalability discussions",
+      topics: [
+        "Scalability",
+        "Load Balancing",
+        "Databases",
+        "Caching",
+        "Microservices",
+        "Message Queues",
+        "CDN",
+        "Monitoring",
+        "Security",
+      ],
+    },
+    behavioral: {
+      title: "Behavioral Interview",
+      description: "Soft skills and experience-based questions",
+      topics: [
+        "Leadership",
+        "Teamwork",
+        "Problem Solving",
+        "Communication",
+        "Conflict Resolution",
+        "Time Management",
+        "Adaptability",
+        "Decision Making",
+      ],
+    },
+  }
+
+  const handleTopicToggle = (topic: string) => {
+    setSelectedTopics((prev) => (prev.includes(topic) ? prev.filter((t) => t !== topic) : [...prev, topic]))
+  }
+
+  const handleStartInterview = () => {
+    if (selectedTopics.length === 0) {
+      alert("Please select at least one topic")
+      return
+    }
+
+    // Navigate to interview page with parameters
+    const params = new URLSearchParams({
+      type: selectedType,
+      topics: selectedTopics.join(","),
+      difficulty,
+    })
+
+    router.push(`/interview?${params.toString()}`)
+  }
+
+  return (
+    <div className="flex min-h-screen flex-col">
+      <header className="sticky top-0 z-30 border-b bg-background">
+        <div className="container flex h-16 items-center justify-between px-4 md:px-6">
+          <div className="flex items-center gap-4">
+            <Link href="/dashboard">
+              <Button variant="ghost" size="icon">
+                <ArrowLeft className="h-4 w-4" />
+              </Button>
+            </Link>
+            <div className="flex items-center gap-2 font-bold">
+              <Code className="h-6 w-6" />
+              <span>InterviewAI</span>
+            </div>
+          </div>
+        </div>
+      </header>
+      <main className="flex-1 p-4 md:p-8">
+        <div className="mx-auto max-w-4xl space-y-6">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">Create New Interview</h1>
+            <p className="text-muted-foreground">Configure your mock interview session</p>
+          </div>
+
+          <div className="grid gap-6 md:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle>Interview Type</CardTitle>
+                <CardDescription>Choose the type of interview you want to practice</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <RadioGroup value={selectedType} onValueChange={setSelectedType}>
+                  {Object.entries(interviewTypes).map(([key, type]) => (
+                    <div key={key} className="flex items-center space-x-2">
+                      <RadioGroupItem value={key} id={key} />
+                      <Label htmlFor={key} className="flex-1 cursor-pointer">
+                        <div>
+                          <div className="font-medium">{type.title}</div>
+                          <div className="text-sm text-muted-foreground">{type.description}</div>
+                        </div>
+                      </Label>
+                    </div>
+                  ))}
+                </RadioGroup>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Difficulty Level</CardTitle>
+                <CardDescription>Select the difficulty level for your interview</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <RadioGroup value={difficulty} onValueChange={setDifficulty}>
+                  <div className="flex items-center space-x-2">
+                    <RadioGroupItem value="beginner" id="beginner" />
+                    <Label htmlFor="beginner" className="cursor-pointer">
+                      <div>
+                        <div className="font-medium">Beginner</div>
+                        <div className="text-sm text-muted-foreground">Basic concepts and fundamentals</div>
+                      </div>
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <RadioGroupItem value="intermediate" id="intermediate" />
+                    <Label htmlFor="intermediate" className="cursor-pointer">
+                      <div>
+                        <div className="font-medium">Intermediate</div>
+                        <div className="text-sm text-muted-foreground">Practical application and problem-solving</div>
+                      </div>
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <RadioGroupItem value="advanced" id="advanced" />
+                    <Label htmlFor="advanced" className="cursor-pointer">
+                      <div>
+                        <div className="font-medium">Advanced</div>
+                        <div className="text-sm text-muted-foreground">Complex scenarios and optimization</div>
+                      </div>
+                    </Label>
+                  </div>
+                </RadioGroup>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Topics</CardTitle>
+              <CardDescription>
+                Select the topics you want to focus on for{" "}
+                {interviewTypes[selectedType as keyof typeof interviewTypes].title}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {interviewTypes[selectedType as keyof typeof interviewTypes].topics.map((topic) => (
+                  <div key={topic} className="flex items-center space-x-2">
+                    <Checkbox
+                      id={topic}
+                      checked={selectedTopics.includes(topic)}
+                      onCheckedChange={() => handleTopicToggle(topic)}
+                    />
+                    <Label htmlFor={topic} className="cursor-pointer">
+                      {topic}
+                    </Label>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
+          <div className="flex justify-end gap-4">
+            <Link href="/dashboard">
+              <Button variant="outline">Cancel</Button>
+            </Link>
+            <Button onClick={handleStartInterview} disabled={selectedTopics.length === 0}>
+              <Play className="mr-2 h-4 w-4" />
+              Start Interview
+            </Button>
+          </div>
+        </div>
+      </main>
+    </div>
+  )
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\app\interview\page.tsx ===
+"use client"
+
+import { useState, useEffect, useCallback, useRef } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { Textarea } from "@/components/ui/textarea"
+import { Badge } from "@/components/ui/badge"
+import { Mic, MicOff, Send, ThumbsDown, ThumbsUp, X, Video, VideoOff } from "lucide-react"
+
+interface Message {
+  role: "system" | "assistant" | "user"
+  content: string
+  timestamp: Date
+  score?: number
+}
+
+interface FeedbackData {
+  strengths: string[]
+  improvements: string[]
+  score: number
+  resources: { title: string; description: string }[]
+  detailedAnalysis: string
+  questionScores: { question: string; answer: string; score: number; feedback: string }[]
+}
+
+interface QuestionData {
+  question: string
+  keywords: string[]
+  expectedConcepts: string[]
+  difficulty: number
+}
+
+export default function InterviewPage() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+
+  // Get interview parameters from URL
+  const interviewType = searchParams.get("type") || "frontend"
+  const topics = searchParams.get("topics")?.split(",") || ["React"]
+  const difficulty = searchParams.get("difficulty") || "intermediate"
+
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      role: "system",
+      content: `Welcome to your ${interviewType} mock interview! I'll be asking you technical questions about ${topics.join(", ")} at ${difficulty} level. Let's get started!`,
+      timestamp: new Date(),
+    },
+  ])
+
+  const [input, setInput] = useState("")
+  const [isRecording, setIsRecording] = useState(false)
+  const [isVideoRecording, setIsVideoRecording] = useState(false)
+  const [isThinking, setIsThinking] = useState(false)
+  const [showFeedback, setShowFeedback] = useState(false)
+  const [feedbackData, setFeedbackData] = useState<FeedbackData | null>(null)
+  const [isLoadingFeedback, setIsLoadingFeedback] = useState(false)
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
+  const [userResponses, setUserResponses] = useState<{ answer: string; score: number; feedback: string }[]>([])
+
+  // Timer state
+  const [timeElapsed, setTimeElapsed] = useState(0)
+  const [isTimerRunning, setIsTimerRunning] = useState(true)
+
+  // Video recording state
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const recordedChunksRef = useRef<Blob[]>([])
+  const [isClientSide, setIsClientSide] = useState(false)
+
+  // Set isClientSide to true when component mounts
+  useEffect(() => {
+    setIsClientSide(true)
+  }, [])
+
+  // Enhanced question bank with detailed analysis data
+  const questionBank = {
+    frontend: {
+      beginner: [
+        {
+          question: "What is the difference between HTML, CSS, and JavaScript?",
+          keywords: [
+            "html",
+            "structure",
+            "css",
+            "styling",
+            "javascript",
+            "behavior",
+            "markup",
+            "presentation",
+            "logic",
+          ],
+          expectedConcepts: ["HTML for structure", "CSS for styling", "JavaScript for behavior"],
+          difficulty: 1,
+        },
+        {
+          question: "Explain what the DOM is and how you can manipulate it.",
+          keywords: [
+            "dom",
+            "document",
+            "object",
+            "model",
+            "tree",
+            "elements",
+            "nodes",
+            "manipulation",
+            "getelementbyid",
+            "queryselector",
+          ],
+          expectedConcepts: ["Document Object Model", "Tree structure", "Element manipulation"],
+          difficulty: 2,
+        },
+        {
+          question: "What are CSS selectors and how do they work?",
+          keywords: ["selector", "class", "id", "element", "attribute", "pseudo", "specificity", "cascade"],
+          expectedConcepts: ["Types of selectors", "Specificity", "CSS cascade"],
+          difficulty: 2,
+        },
+        {
+          question: "What is the difference between var, let, and const in JavaScript?",
+          keywords: ["var", "let", "const", "scope", "hoisting", "block", "function", "reassignment", "declaration"],
+          expectedConcepts: ["Variable scoping", "Hoisting behavior", "Reassignment rules"],
+          difficulty: 2,
+        },
+        {
+          question: "How do you make a website responsive?",
+          keywords: ["responsive", "media", "queries", "flexbox", "grid", "viewport", "mobile", "breakpoints", "fluid"],
+          expectedConcepts: ["Media queries", "Flexible layouts", "Mobile-first design"],
+          difficulty: 2,
+        },
+        {
+          question: "What is the box model in CSS?",
+          keywords: ["box", "model", "margin", "border", "padding", "content", "width", "height", "sizing"],
+          expectedConcepts: ["Content, padding, border, margin", "Box-sizing property"],
+          difficulty: 2,
+        },
+        {
+          question: "Explain event handling in JavaScript.",
+          keywords: [
+            "event",
+            "listener",
+            "handler",
+            "click",
+            "addeventlistener",
+            "bubbling",
+            "capturing",
+            "delegation",
+          ],
+          expectedConcepts: ["Event listeners", "Event propagation", "Event delegation"],
+          difficulty: 2,
+        },
+        {
+          question: "What are the different data types in JavaScript?",
+          keywords: ["primitive", "object", "string", "number", "boolean", "undefined", "null", "symbol", "bigint"],
+          expectedConcepts: ["Primitive types", "Reference types", "Type coercion"],
+          difficulty: 1,
+        },
+      ],
+      intermediate: [
+        {
+          question: "Explain how React's virtual DOM works and its benefits.",
+          keywords: [
+            "virtual",
+            "dom",
+            "react",
+            "reconciliation",
+            "diff",
+            "performance",
+            "fiber",
+            "rendering",
+            "update",
+          ],
+          expectedConcepts: ["Virtual DOM concept", "Reconciliation process", "Performance benefits"],
+          difficulty: 3,
+        },
+        {
+          question: "What are React hooks and how do they differ from class components?",
+          keywords: ["hooks", "usestate", "useeffect", "functional", "class", "lifecycle", "state", "side", "effects"],
+          expectedConcepts: ["Hook rules", "State management", "Lifecycle equivalents"],
+          difficulty: 3,
+        },
+        {
+          question: "How would you handle state management in a large React application?",
+          keywords: ["state", "redux", "context", "zustand", "recoil", "global", "local", "props", "lifting"],
+          expectedConcepts: ["State management patterns", "Global vs local state", "State libraries"],
+          difficulty: 4,
+        },
+        {
+          question: "Explain the concept of closures in JavaScript with an example.",
+          keywords: ["closure", "scope", "lexical", "function", "variable", "access", "memory", "encapsulation"],
+          expectedConcepts: ["Lexical scoping", "Function scope", "Memory retention"],
+          difficulty: 3,
+        },
+        {
+          question: "What is the difference between synchronous and asynchronous JavaScript?",
+          keywords: [
+            "synchronous",
+            "asynchronous",
+            "callback",
+            "promise",
+            "async",
+            "await",
+            "event",
+            "loop",
+            "blocking",
+          ],
+          expectedConcepts: ["Event loop", "Non-blocking execution", "Promise handling"],
+          difficulty: 3,
+        },
+        {
+          question: "How do you optimize website performance?",
+          keywords: [
+            "performance",
+            "optimization",
+            "lazy",
+            "loading",
+            "caching",
+            "minification",
+            "compression",
+            "cdn",
+            "bundle",
+          ],
+          expectedConcepts: ["Loading optimization", "Caching strategies", "Bundle optimization"],
+          difficulty: 4,
+        },
+        {
+          question: "Explain CSS Grid vs Flexbox - when would you use each?",
+          keywords: ["grid", "flexbox", "layout", "two", "dimensional", "one", "dimensional", "container", "items"],
+          expectedConcepts: ["Grid for 2D layouts", "Flexbox for 1D layouts", "Use cases"],
+          difficulty: 3,
+        },
+        {
+          question: "What are promises and how do they work?",
+          keywords: ["promise", "resolve", "reject", "then", "catch", "finally", "pending", "fulfilled", "rejected"],
+          expectedConcepts: ["Promise states", "Promise chaining", "Error handling"],
+          difficulty: 3,
+        },
+        {
+          question: "How would you implement authentication in a React app?",
+          keywords: ["authentication", "jwt", "token", "login", "logout", "protected", "routes", "context", "session"],
+          expectedConcepts: ["Token management", "Protected routes", "Authentication flow"],
+          difficulty: 4,
+        },
+        {
+          question: "Explain the concept of hoisting in JavaScript.",
+          keywords: ["hoisting", "variable", "function", "declaration", "initialization", "temporal", "dead", "zone"],
+          expectedConcepts: ["Variable hoisting", "Function hoisting", "Temporal dead zone"],
+          difficulty: 3,
+        },
+      ],
+      advanced: [
+        {
+          question: "How would you implement a custom React hook for data fetching with caching?",
+          keywords: [
+            "custom",
+            "hook",
+            "data",
+            "fetching",
+            "caching",
+            "useeffect",
+            "usestate",
+            "usecallback",
+            "usememo",
+          ],
+          expectedConcepts: ["Custom hook patterns", "Caching strategies", "Dependency management"],
+          difficulty: 5,
+        },
+        {
+          question: "Explain React's reconciliation algorithm and Fiber architecture.",
+          keywords: [
+            "reconciliation",
+            "fiber",
+            "algorithm",
+            "priority",
+            "scheduling",
+            "concurrent",
+            "rendering",
+            "work",
+          ],
+          expectedConcepts: ["Fiber architecture", "Priority scheduling", "Concurrent rendering"],
+          difficulty: 5,
+        },
+        {
+          question: "How would you optimize a React app rendering 10,000+ list items?",
+          keywords: ["virtualization", "windowing", "react", "window", "memo", "usememo", "pagination", "lazy"],
+          expectedConcepts: ["Virtual scrolling", "Memoization", "Pagination strategies"],
+          difficulty: 5,
+        },
+        {
+          question: "Implement a debounce function from scratch and explain its use cases.",
+          keywords: ["debounce", "throttle", "delay", "timeout", "search", "api", "calls", "performance"],
+          expectedConcepts: ["Debouncing concept", "Implementation details", "Use cases"],
+          difficulty: 4,
+        },
+        {
+          question: "How would you handle memory leaks in a React application?",
+          keywords: ["memory", "leak", "cleanup", "useeffect", "subscription", "listener", "unmount", "reference"],
+          expectedConcepts: ["Memory leak sources", "Cleanup strategies", "Best practices"],
+          difficulty: 5,
+        },
+        {
+          question: "Explain the differences between server-side rendering and client-side rendering.",
+          keywords: ["ssr", "csr", "hydration", "seo", "performance", "first", "paint", "time", "to", "interactive"],
+          expectedConcepts: ["SSR vs CSR", "Hydration process", "Performance implications"],
+          difficulty: 4,
+        },
+        {
+          question: "How would you implement a micro-frontend architecture?",
+          keywords: [
+            "micro",
+            "frontend",
+            "module",
+            "federation",
+            "webpack",
+            "single",
+            "spa",
+            "independent",
+            "deployment",
+          ],
+          expectedConcepts: ["Micro-frontend patterns", "Module federation", "Independent deployment"],
+          difficulty: 5,
+        },
+        {
+          question: "Design a caching strategy for a large-scale web application.",
+          keywords: ["caching", "strategy", "browser", "cache", "cdn", "service", "worker", "redis", "memory"],
+          expectedConcepts: ["Caching layers", "Cache invalidation", "Performance optimization"],
+          difficulty: 5,
+        },
+      ],
+    },
+    backend: {
+      beginner: [
+        {
+          question: "What is the difference between HTTP and HTTPS?",
+          keywords: ["http", "https", "ssl", "tls", "encryption", "security", "certificate", "protocol"],
+          expectedConcepts: ["Protocol differences", "Security features", "SSL/TLS"],
+          difficulty: 1,
+        },
+        {
+          question: "Explain what REST API is and its principles.",
+          keywords: ["rest", "api", "stateless", "resource", "http", "methods", "get", "post", "put", "delete"],
+          expectedConcepts: ["REST principles", "HTTP methods", "Stateless design"],
+          difficulty: 2,
+        },
+        {
+          question: "What are the different HTTP methods and when to use them?",
+          keywords: ["get", "post", "put", "patch", "delete", "options", "head", "idempotent", "safe"],
+          expectedConcepts: ["HTTP method purposes", "Idempotency", "Safe methods"],
+          difficulty: 2,
+        },
+        {
+          question: "What is a database and what are the types?",
+          keywords: ["database", "sql", "nosql", "relational", "document", "key", "value", "graph", "column"],
+          expectedConcepts: ["Database types", "SQL vs NoSQL", "Use cases"],
+          difficulty: 1,
+        },
+        {
+          question: "Explain what middleware is in web development.",
+          keywords: ["middleware", "request", "response", "pipeline", "authentication", "logging", "cors", "express"],
+          expectedConcepts: ["Middleware concept", "Request pipeline", "Common middleware"],
+          difficulty: 2,
+        },
+        {
+          question: "What is the difference between SQL and NoSQL databases?",
+          keywords: ["sql", "nosql", "relational", "document", "schema", "acid", "base", "consistency", "scalability"],
+          expectedConcepts: ["Data models", "ACID vs BASE", "Scalability differences"],
+          difficulty: 2,
+        },
+        {
+          question: "How do you handle errors in API development?",
+          keywords: ["error", "handling", "try", "catch", "status", "codes", "logging", "validation", "middleware"],
+          expectedConcepts: ["Error handling patterns", "HTTP status codes", "Error logging"],
+          difficulty: 2,
+        },
+        {
+          question: "What is authentication vs authorization?",
+          keywords: ["authentication", "authorization", "identity", "permissions", "jwt", "session", "oauth", "rbac"],
+          expectedConcepts: ["Authentication process", "Authorization mechanisms", "Security patterns"],
+          difficulty: 2,
+        },
+      ],
+      intermediate: [
+        {
+          question: "How would you design a RESTful API for a blog system?",
+          keywords: ["rest", "api", "design", "resources", "endpoints", "blog", "posts", "users", "comments", "crud"],
+          expectedConcepts: ["Resource modeling", "Endpoint design", "CRUD operations"],
+          difficulty: 3,
+        },
+        {
+          question: "Explain database indexing and when to use it.",
+          keywords: ["index", "indexing", "performance", "query", "optimization", "btree", "hash", "composite"],
+          expectedConcepts: ["Index types", "Performance impact", "When to use indexes"],
+          difficulty: 3,
+        },
+        {
+          question: "How do you handle concurrent requests in Node.js?",
+          keywords: ["concurrency", "nodejs", "event", "loop", "async", "await", "promises", "worker", "threads"],
+          expectedConcepts: ["Event loop", "Asynchronous processing", "Concurrency patterns"],
+          difficulty: 4,
+        },
+        {
+          question: "What are microservices and their advantages?",
+          keywords: [
+            "microservices",
+            "monolith",
+            "distributed",
+            "scalability",
+            "independence",
+            "deployment",
+            "communication",
+          ],
+          expectedConcepts: ["Microservice architecture", "Benefits and drawbacks", "Communication patterns"],
+          difficulty: 4,
+        },
+        {
+          question: "How would you implement caching in a web application?",
+          keywords: ["caching", "redis", "memcached", "browser", "cache", "cdn", "strategy", "invalidation"],
+          expectedConcepts: ["Caching layers", "Cache strategies", "Cache invalidation"],
+          difficulty: 3,
+        },
+        {
+          question: "Explain ACID properties in databases.",
+          keywords: ["acid", "atomicity", "consistency", "isolation", "durability", "transaction", "database"],
+          expectedConcepts: ["ACID properties", "Transaction management", "Data integrity"],
+          difficulty: 3,
+        },
+        {
+          question: "How do you secure an API?",
+          keywords: ["security", "api", "authentication", "authorization", "jwt", "oauth", "rate", "limiting", "cors"],
+          expectedConcepts: ["API security measures", "Authentication methods", "Security best practices"],
+          difficulty: 4,
+        },
+        {
+          question: "What is load balancing and how does it work?",
+          keywords: ["load", "balancing", "distribution", "round", "robin", "least", "connections", "health", "check"],
+          expectedConcepts: ["Load balancing algorithms", "Health checks", "Scalability"],
+          difficulty: 3,
+        },
+        {
+          question: "How would you handle database migrations?",
+          keywords: ["migration", "database", "schema", "version", "control", "rollback", "deployment", "changes"],
+          expectedConcepts: ["Migration strategies", "Version control", "Rollback procedures"],
+          difficulty: 3,
+        },
+        {
+          question: "Explain the concept of database normalization.",
+          keywords: ["normalization", "normal", "forms", "1nf", "2nf", "3nf", "redundancy", "integrity"],
+          expectedConcepts: ["Normal forms", "Data redundancy", "Database design"],
+          difficulty: 3,
+        },
+      ],
+      advanced: [
+        {
+          question: "Design a distributed system for handling millions of requests per second.",
+          keywords: ["distributed", "system", "scalability", "load", "balancing", "caching", "database", "sharding"],
+          expectedConcepts: ["System architecture", "Scalability patterns", "Performance optimization"],
+          difficulty: 5,
+        },
+        {
+          question: "How would you implement a message queue system?",
+          keywords: ["message", "queue", "rabbitmq", "kafka", "redis", "pub", "sub", "producer", "consumer"],
+          expectedConcepts: ["Message queue patterns", "Reliability", "Scalability"],
+          difficulty: 5,
+        },
+        {
+          question: "Explain database sharding and its trade-offs.",
+          keywords: ["sharding", "partitioning", "horizontal", "scaling", "consistency", "joins", "rebalancing"],
+          expectedConcepts: ["Sharding strategies", "Trade-offs", "Consistency challenges"],
+          difficulty: 5,
+        },
+        {
+          question: "How would you design a real-time chat system?",
+          keywords: ["real", "time", "chat", "websockets", "socket.io", "scaling", "message", "delivery"],
+          expectedConcepts: ["Real-time communication", "WebSocket implementation", "Scaling strategies"],
+          difficulty: 5,
+        },
+        {
+          question: "Implement a rate limiting algorithm and explain different approaches.",
+          keywords: ["rate", "limiting", "token", "bucket", "sliding", "window", "fixed", "window", "algorithm"],
+          expectedConcepts: ["Rate limiting algorithms", "Implementation details", "Trade-offs"],
+          difficulty: 4,
+        },
+        {
+          question: "How would you handle data consistency in microservices?",
+          keywords: [
+            "consistency",
+            "microservices",
+            "eventual",
+            "consistency",
+            "saga",
+            "pattern",
+            "distributed",
+            "transactions",
+          ],
+          expectedConcepts: ["Consistency models", "Saga pattern", "Distributed transactions"],
+          difficulty: 5,
+        },
+        {
+          question: "Design a caching layer for a high-traffic application.",
+          keywords: ["caching", "layer", "redis", "memcached", "cdn", "strategy", "invalidation", "performance"],
+          expectedConcepts: ["Caching architecture", "Cache strategies", "Performance optimization"],
+          difficulty: 5,
+        },
+        {
+          question: "How would you implement database replication for high availability?",
+          keywords: ["replication", "master", "slave", "failover", "consistency", "lag", "availability"],
+          expectedConcepts: ["Replication strategies", "Failover mechanisms", "Consistency trade-offs"],
+          difficulty: 5,
+        },
+      ],
+    },
+  }
+
+  // Timer effect
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null
+
+    if (isTimerRunning) {
+      interval = setInterval(() => {
+        setTimeElapsed((prev) => prev + 1)
+      }, 1000)
+    }
+
+    return () => {
+      if (interval) clearInterval(interval)
+    }
+  }, [isTimerRunning])
+
+  // Initialize first question
+  useEffect(() => {
+    const questions =
+      questionBank[interviewType as keyof typeof questionBank]?.[difficulty as keyof typeof questionBank.frontend] ||
+      questionBank.frontend.intermediate
+
+    if (questions.length > 0) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: questions[0].question,
+          timestamp: new Date(),
+        },
+      ])
+    }
+  }, [interviewType, difficulty])
+
+  // Format time display
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
+  }
+
+  // Enhanced response analysis
+  const analyzeResponse = (userAnswer: string, questionData: QuestionData) => {
+    const answer = userAnswer.toLowerCase()
+    const wordCount = userAnswer.split(" ").length
+
+    // Check for keywords
+    const foundKeywords = questionData.keywords.filter((keyword) => answer.includes(keyword.toLowerCase()))
+    const keywordScore = (foundKeywords.length / questionData.keywords.length) * 100
+
+    // Check for expected concepts
+    const foundConcepts = questionData.expectedConcepts.filter(
+      (concept) =>
+        answer.includes(concept.toLowerCase()) ||
+        concept
+          .toLowerCase()
+          .split(" ")
+          .some((word) => answer.includes(word)),
+    )
+    const conceptScore = (foundConcepts.length / questionData.expectedConcepts.length) * 100
+
+    // Length-based scoring
+    let lengthScore = 0
+    if (wordCount < 5) lengthScore = 10
+    else if (wordCount < 15) lengthScore = 30
+    else if (wordCount < 30) lengthScore = 50
+    else if (wordCount < 50) lengthScore = 70
+    else lengthScore = 85
+
+    // Calculate final score
+    const finalScore = Math.round(keywordScore * 0.4 + conceptScore * 0.4 + lengthScore * 0.2)
+
+    // Generate feedback based on score
+    let feedback = ""
+    if (finalScore < 30) {
+      feedback =
+        "Your answer lacks key concepts and technical details. Try to include more specific information about the topic."
+    } else if (finalScore < 50) {
+      feedback =
+        "Your answer touches on some relevant points but could be more comprehensive. Consider explaining the concepts in more detail."
+    } else if (finalScore < 70) {
+      feedback =
+        "Good answer! You covered several important points. You could enhance it by discussing additional aspects or providing examples."
+    } else if (finalScore < 85) {
+      feedback =
+        "Excellent answer! You demonstrated good understanding of the topic with relevant details and concepts."
+    } else {
+      feedback = "Outstanding answer! You provided comprehensive coverage of the topic with excellent technical depth."
+    }
+
+    return { score: Math.max(0, Math.min(100, finalScore)), feedback, foundKeywords, foundConcepts }
+  }
+
+  const generateFollowUp = (userAnswer: string, currentQuestionData: QuestionData, analysis: any) => {
+    const questions =
+      questionBank[interviewType as keyof typeof questionBank]?.[difficulty as keyof typeof questionBank.frontend] ||
+      questionBank.frontend.intermediate
+
+    const nextQuestionIndex = Math.min(currentQuestionIndex + 1, questions.length - 1)
+    const nextQuestion = questions[nextQuestionIndex]
+
+    if (analysis.score < 30) {
+      return `I notice your answer could be more detailed and specific. ${analysis.feedback} Let me ask you another question: ${nextQuestion.question}`
+    } else if (analysis.score < 50) {
+      return `${analysis.feedback} Let's continue with the next question: ${nextQuestion.question}`
+    } else if (analysis.score < 70) {
+      return `${analysis.feedback} Moving on to our next topic: ${nextQuestion.question}`
+    } else {
+      return `${analysis.feedback} Great! Let's proceed to the next question: ${nextQuestion.question}`
+    }
+  }
+
+  const handleSend = useCallback(async () => {
+    if (!input.trim()) return
+
+    const userMessage: Message = { role: "user", content: input, timestamp: new Date() }
+    setMessages((prev) => [...prev, userMessage])
+    setInput("")
+    setIsThinking(true)
+
+    try {
+      // Get current question data
+      const questions =
+        questionBank[interviewType as keyof typeof questionBank]?.[difficulty as keyof typeof questionBank.frontend] ||
+        questionBank.frontend.intermediate
+
+      const currentQuestionData = questions[currentQuestionIndex]
+
+      // Analyze the user's response
+      const analysis = analyzeResponse(input, currentQuestionData)
+
+      // Store the response with analysis
+      setUserResponses((prev) => [
+        ...prev,
+        {
+          answer: input,
+          score: analysis.score,
+          feedback: analysis.feedback,
+        },
+      ])
+
+      // Generate appropriate follow-up
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+
+      let aiResponse = ""
+      if (currentQuestionIndex < questions.length - 1) {
+        aiResponse = generateFollowUp(input, currentQuestionData, analysis)
+        setCurrentQuestionIndex((prev) => prev + 1)
+      } else {
+        aiResponse = `${analysis.feedback} That concludes our interview. You can now request feedback to see your detailed performance analysis.`
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: aiResponse,
+          timestamp: new Date(),
+          score: analysis.score,
+        },
+      ])
+    } catch (error) {
+      console.error("Error sending message:", error)
+    } finally {
+      setIsThinking(false)
+    }
+  }, [input, currentQuestionIndex, interviewType, difficulty])
+
+  const toggleRecording = () => {
+    setIsRecording(!isRecording)
+    if (!isRecording) {
+      console.log("Started audio recording...")
+    } else {
+      console.log("Stopped audio recording...")
+    }
+  }
+
+  const toggleVideoRecording = async () => {
+    if (!isClientSide) return
+
+    if (!isVideoRecording) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        })
+
+        const recorder = new MediaRecorder(stream)
+        const chunks: Blob[] = []
+
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            chunks.push(event.data)
+          }
+        }
+
+        recorder.onstop = async () => {
+          const blob = new Blob(chunks, { type: "video/webm" })
+          await sendVideoToEmail(blob)
+          stream.getTracks().forEach((track) => track.stop())
+        }
+
+        recorder.start()
+        mediaRecorderRef.current = recorder
+        recordedChunksRef.current = chunks
+        setIsVideoRecording(true)
+        console.log("Started video recording...")
+      } catch (error) {
+        console.error("Error starting video recording:", error)
+        alert("Could not start video recording. Please check camera permissions.")
+      }
+    } else {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+        mediaRecorderRef.current.stop()
+        setIsVideoRecording(false)
+        console.log("Stopped video recording...")
+      }
+    }
+  }
+
+  const sendVideoToEmail = async (videoBlob: Blob) => {
+    if (!isClientSide) return
+
+    try {
+      const formData = new FormData()
+      formData.append("video", videoBlob, `interview-${Date.now()}.webm`)
+      formData.append("email", "saisagardunna04@gmail.com")
+      formData.append("interviewType", interviewType)
+      formData.append("topics", topics.join(", "))
+      formData.append("duration", formatTime(timeElapsed))
+
+      const response = await fetch("/api/send-video", {
+        method: "POST",
+        body: formData,
+      })
+
+      if (response.ok) {
+        alert("Video recording sent to saisagardunna04@gmail.com successfully!")
+      } else {
+        throw new Error("Failed to send video")
+      }
+    } catch (error) {
+      console.error("Error sending video:", error)
+      alert("Failed to send video to email. Please try again.")
+    }
+  }
+
+  const handleExit = () => {
+    setIsTimerRunning(false)
+    if (isVideoRecording && mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop()
+    }
+    router.push("/dashboard")
+  }
+
+  const requestFeedback = async () => {
+    setIsLoadingFeedback(true)
+    setIsTimerRunning(false)
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+
+      // Calculate detailed feedback
+      const questions =
+        questionBank[interviewType as keyof typeof questionBank]?.[difficulty as keyof typeof questionBank.frontend] ||
+        questionBank.frontend.intermediate
+
+      const questionScores = userResponses.map((response, index) => ({
+        question: questions[index]?.question || "Question not found",
+        answer: response.answer,
+        score: response.score,
+        feedback: response.feedback,
+      }))
+
+      const averageScore =
+        userResponses.length > 0
+          ? Math.round(userResponses.reduce((sum, r) => sum + r.score, 0) / userResponses.length)
+          : 0
+
+      // Generate strengths and improvements based on actual performance
+      const strengths = []
+      const improvements = []
+
+      const highScoreCount = userResponses.filter((r) => r.score >= 70).length
+      const lowScoreCount = userResponses.filter((r) => r.score < 50).length
+      const avgResponseLength = userResponses.reduce((sum, r) => sum + r.answer.length, 0) / userResponses.length || 0
+
+      if (highScoreCount > userResponses.length / 2) {
+        strengths.push("Demonstrated strong technical knowledge in most areas")
+      }
+      if (avgResponseLength > 100) {
+        strengths.push("Provided detailed and comprehensive answers")
+      }
+      if (userResponses.length >= 5) {
+        strengths.push("Engaged actively throughout the interview process")
+      }
+      if (averageScore >= 70) {
+        strengths.push("Showed good understanding of core concepts")
+      }
+
+      if (lowScoreCount > userResponses.length / 3) {
+        improvements.push("Focus on understanding fundamental concepts more deeply")
+      }
+      if (avgResponseLength < 50) {
+        improvements.push("Provide more detailed explanations with specific examples")
+      }
+      if (averageScore < 60) {
+        improvements.push("Review key technical concepts and practice explaining them clearly")
+      }
+      if (userResponses.length < 3) {
+        improvements.push("Engage more actively and provide more comprehensive responses")
+      }
+
+      const detailedFeedback: FeedbackData = {
+        strengths:
+          strengths.length > 0 ? strengths : ["Completed the interview session", "Showed willingness to participate"],
+        improvements:
+          improvements.length > 0
+            ? improvements
+            : ["Continue practicing technical interviews", "Review fundamental concepts"],
+        score: averageScore,
+        detailedAnalysis: `Based on ${userResponses.length} responses with an average score of ${averageScore}%. Your performance varied across different topics, with ${highScoreCount} strong answers and ${lowScoreCount} areas needing improvement.`,
+        questionScores,
+        resources: [
+          {
+            title: `${interviewType.charAt(0).toUpperCase() + interviewType.slice(1)} Interview Mastery`,
+            description: `Comprehensive preparation guide covering ${topics.join(", ")} with practice questions and detailed explanations`,
+          },
+          {
+            title: "Technical Communication Skills",
+            description: "Learn how to structure and articulate technical concepts clearly during interviews",
+          },
+        ],
+      }
+
+      setFeedbackData(detailedFeedback)
+      setShowFeedback(true)
+    } catch (error) {
+      console.error("Error generating feedback:", error)
+    } finally {
+      setIsLoadingFeedback(false)
+    }
+  }
+
+  return (
+    <div className="flex min-h-screen flex-col">
+      <header className="sticky top-0 z-30 border-b bg-background">
+        <div className="container flex h-16 items-center justify-between px-4 md:px-6">
+          <div className="flex items-center gap-4">
+            <Button variant="outline" size="sm" onClick={handleExit}>
+              <X className="h-4 w-4 mr-2" />
+              Exit
+            </Button>
+            <div>
+              <h1 className="text-lg font-semibold capitalize">{interviewType} Developer Interview</h1>
+              <p className="text-sm text-muted-foreground">
+                {topics.join(", ")} • {difficulty} • Question {currentQuestionIndex + 1}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className={isRecording ? "bg-red-50 text-red-600 border-red-200" : ""}>
+              <span className={`mr-1 ${isRecording ? "animate-pulse" : ""}`}>●</span>
+              {isRecording ? "Recording Audio" : "Audio Off"}
+            </Badge>
+            {isClientSide && (
+              <Badge variant="outline" className={isVideoRecording ? "bg-blue-50 text-blue-600 border-blue-200" : ""}>
+                <span className={`mr-1 ${isVideoRecording ? "animate-pulse" : ""}`}>●</span>
+                {isVideoRecording ? "Recording Video" : "Video Off"}
+              </Badge>
+            )}
+            <Badge variant="outline">{formatTime(timeElapsed)}</Badge>
+            <Button variant="outline" size="sm" onClick={requestFeedback} disabled={isLoadingFeedback}>
+              {isLoadingFeedback ? "Analyzing..." : "Get Feedback"}
+            </Button>
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1 overflow-auto p-4 md:p-6">
+        <div className="mx-auto max-w-4xl">
+          <div className="space-y-4 pb-20">
+            {messages.map((message, index) => (
+              <div key={index} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div
+                  className={`rounded-lg px-4 py-2 max-w-[80%] ${
+                    message.role === "user"
+                      ? "bg-primary text-primary-foreground"
+                      : message.role === "system"
+                        ? "bg-muted text-muted-foreground"
+                        : "bg-muted"
+                  }`}
+                >
+                  <p className="whitespace-pre-wrap">{message.content}</p>
+                  <div className="flex items-center justify-between mt-1">
+                    <span className="text-xs opacity-70">{message.timestamp.toLocaleTimeString()}</span>
+                    {message.score !== undefined && (
+                      <Badge variant="outline" className="text-xs">
+                        Score: {message.score}%
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+            {isThinking && (
+              <div className="flex justify-start">
+                <div className="rounded-lg px-4 py-2 bg-muted">
+                  <div className="flex items-center gap-2">
+                    <div className="flex space-x-1">
+                      <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground"></div>
+                      <div
+                        className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground"
+                        style={{ animationDelay: "0.2s" }}
+                      ></div>
+                      <div
+                        className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground"
+                        style={{ animationDelay: "0.4s" }}
+                      ></div>
+                    </div>
+                    <span className="text-sm text-muted-foreground">Analyzing your response...</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {showFeedback && feedbackData && (
+          <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+            <Card className="w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+              <CardHeader>
+                <CardTitle>Comprehensive Interview Analysis</CardTitle>
+                <CardDescription>Detailed performance breakdown for your {interviewType} interview</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div className="space-y-3">
+                    <h3 className="font-medium text-green-600 flex items-center gap-2">
+                      <ThumbsUp className="h-4 w-4" />
+                      Strengths
+                    </h3>
+                    <ul className="space-y-2">
+                      {feedbackData.strengths.map((strength, index) => (
+                        <li key={index} className="text-sm bg-green-50 p-3 rounded border-l-4 border-green-200">
+                          {strength}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="space-y-3">
+                    <h3 className="font-medium text-orange-600 flex items-center gap-2">
+                      <ThumbsDown className="h-4 w-4" />
+                      Areas for Improvement
+                    </h3>
+                    <ul className="space-y-2">
+                      {feedbackData.improvements.map((improvement, index) => (
+                        <li key={index} className="text-sm bg-orange-50 p-3 rounded border-l-4 border-orange-200">
+                          {improvement}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <h3 className="font-medium">Overall Performance Score</h3>
+                  <div className="flex items-center gap-4">
+                    <div className="h-8 w-full rounded-full bg-muted relative overflow-hidden">
+                      <div
+                        className="h-8 rounded-full bg-gradient-to-r from-red-500 via-yellow-500 to-green-500 transition-all duration-1000"
+                        style={{ width: `${feedbackData.score}%` }}
+                      />
+                    </div>
+                    <span className="font-bold text-3xl min-w-[80px]">{feedbackData.score}%</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">{feedbackData.detailedAnalysis}</p>
+                </div>
+
+                <div className="space-y-3">
+                  <h3 className="font-medium">Question-by-Question Analysis</h3>
+                  <div className="space-y-3 max-h-60 overflow-y-auto">
+                    {feedbackData.questionScores.map((item, index) => (
+                      <div key={index} className="border rounded-lg p-4 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <h4 className="font-medium text-sm">Question {index + 1}</h4>
+                          <Badge
+                            variant={item.score >= 70 ? "default" : item.score >= 50 ? "secondary" : "destructive"}
+                          >
+                            {item.score}%
+                          </Badge>
+                        </div>
+                        <p className="text-sm text-muted-foreground">{item.question}</p>
+                        <p className="text-xs bg-gray-50 p-2 rounded">{item.feedback}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <h3 className="font-medium">Recommended Learning Resources</h3>
+                  <div className="grid gap-3">
+                    {feedbackData.resources.map((resource, index) => (
+                      <div key={index} className="rounded-lg border p-4 hover:bg-accent/50 transition-colors">
+                        <div className="font-medium text-sm">{resource.title}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{resource.description}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="bg-blue-50 p-4 rounded-lg">
+                  <h4 className="font-medium text-blue-800 mb-2">Interview Summary</h4>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div>
+                      <span className="text-blue-600">Duration:</span>
+                      <div className="font-medium">{formatTime(timeElapsed)}</div>
+                    </div>
+                    <div>
+                      <span className="text-blue-600">Questions:</span>
+                      <div className="font-medium">{feedbackData.questionScores.length}</div>
+                    </div>
+                    <div>
+                      <span className="text-blue-600">Type:</span>
+                      <div className="font-medium capitalize">{interviewType}</div>
+                    </div>
+                    <div>
+                      <span className="text-blue-600">Level:</span>
+                      <div className="font-medium capitalize">{difficulty}</div>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+              <CardFooter className="flex justify-between">
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm">
+                    <ThumbsDown className="mr-2 h-4 w-4" />
+                    Not Helpful
+                  </Button>
+                  <Button variant="outline" size="sm">
+                    <ThumbsUp className="mr-2 h-4 w-4" />
+                    Helpful
+                  </Button>
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => setShowFeedback(false)}>
+                    Continue Interview
+                  </Button>
+                  <Button onClick={handleExit}>End Interview</Button>
+                </div>
+              </CardFooter>
+            </Card>
+          </div>
+        )}
+      </main>
+
+      <div className="sticky bottom-0 border-t bg-background p-4">
+        <div className="mx-auto flex max-w-4xl items-center gap-2">
+          <Button
+            variant="outline"
+            size="icon"
+            className={isRecording ? "bg-red-100 text-red-500 dark:bg-red-900/20" : ""}
+            onClick={toggleRecording}
+            title="Toggle audio recording"
+          >
+            {isRecording ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+          </Button>
+          {isClientSide && (
+            <Button
+              variant="outline"
+              size="icon"
+              className={isVideoRecording ? "bg-blue-100 text-blue-500 dark:bg-blue-900/20" : ""}
+              onClick={toggleVideoRecording}
+              title="Toggle video recording - will be sent to saisagardunna04@gmail.com"
+            >
+              {isVideoRecording ? <VideoOff className="h-5 w-5" /> : <Video className="h-5 w-5" />}
+            </Button>
+          )}
+          <Textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Type your answer..."
+            className="min-h-10 flex-1 resize-none"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault()
+                handleSend()
+              }
+            }}
+          />
+          <Button size="icon" onClick={handleSend} disabled={!input.trim() || isThinking}>
+            <Send className="h-5 w-5" />
+            <span className="sr-only">Send</span>
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\app\sign-in\page.tsx ===
+import Link from "next/link"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Code, Github } from "lucide-react"
+
+export default function SignInPage() {
+  return (
+    <div className="flex min-h-screen flex-col">
+      <div className="flex min-h-screen flex-col items-center justify-center p-4 md:p-8">
+        <Link href="/" className="mb-8 flex items-center gap-2 text-lg font-bold">
+          <Code className="h-6 w-6" />
+          <span>InterviewAI</span>
+        </Link>
+        <div className="mx-auto w-full max-w-md space-y-6">
+          <div className="space-y-2 text-center">
+            <h1 className="text-3xl font-bold">Sign In</h1>
+            <p className="text-gray-500 dark:text-gray-400">Enter your email to sign in to your account</p>
+          </div>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="email">Email</Label>
+              <Input id="email" placeholder="m@example.com" required type="email" />
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="password">Password</Label>
+                <Link className="text-sm underline" href="/forgot-password">
+                  Forgot password?
+                </Link>
+              </div>
+              <Input id="password" required type="password" />
+            </div>
+            <Button className="w-full" type="submit">
+              Sign In
+            </Button>
+            <Button className="w-full" variant="outline">
+              <Github className="mr-2 h-4 w-4" />
+              Sign In with GitHub
+            </Button>
+            <div className="text-center text-sm">
+              Don&apos;t have an account?{" "}
+              <Link className="underline" href="/sign-up">
+                Sign Up
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\app\sign-up\page.tsx ===
+import Link from "next/link"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Code, Github } from "lucide-react"
+
+export default function SignUpPage() {
+  return (
+    <div className="flex min-h-screen flex-col">
+      <div className="flex min-h-screen flex-col items-center justify-center p-4 md:p-8">
+        <Link href="/" className="mb-8 flex items-center gap-2 text-lg font-bold">
+          <Code className="h-6 w-6" />
+          <span>InterviewAI</span>
+        </Link>
+        <div className="mx-auto w-full max-w-md space-y-6">
+          <div className="space-y-2 text-center">
+            <h1 className="text-3xl font-bold">Sign Up</h1>
+            <p className="text-gray-500 dark:text-gray-400">Create an account to get started</p>
+          </div>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="first-name">First name</Label>
+                <Input id="first-name" placeholder="John" required />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="last-name">Last name</Label>
+                <Input id="last-name" placeholder="Doe" required />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="email">Email</Label>
+              <Input id="email" placeholder="m@example.com" required type="email" />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="password">Password</Label>
+              <Input id="password" required type="password" />
+            </div>
+            <Button className="w-full" type="submit">
+              Create Account
+            </Button>
+            <Button className="w-full" variant="outline">
+              <Github className="mr-2 h-4 w-4" />
+              Sign Up with GitHub
+            </Button>
+            <div className="text-center text-sm">
+              Already have an account?{" "}
+              <Link className="underline" href="/sign-in">
+                Sign In
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\app\globals.css ===
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96.1%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 0 0% 96.1%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 89.8%;
+    --input: 0 0% 89.8%;
+    --ring: 0 0% 3.9%;
+    --chart-1: 12 76% 61%;
+    --chart-2: 173 58% 39%;
+    --chart-3: 197 37% 24%;
+    --chart-4: 43 74% 66%;
+    --chart-5: 27 87% 67%;
+    --radius: 0.5rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+  .dark {
+    --background: 0 0% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 0 0% 14.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 0 0% 83.1%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\app\layout.tsx ===
+import type { Metadata } from 'next'
+import './globals.css'
+
+export const metadata: Metadata = {
+  title: 'v0 App',
+  description: 'Created with v0',
+  generator: 'v0.dev',
+}
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode
+}>) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  )
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\app\page.tsx ===
+import Link from "next/link"
+import { Button } from "@/components/ui/button"
+import { ArrowRight, Briefcase, CheckCircle, Clock, Code } from "lucide-react"
+
+export default function Home() {
+  return (
+    <div className="flex flex-col min-h-screen">
+      <header className="border-b">
+        <div className="container flex h-16 items-center justify-between px-4 md:px-6">
+          <div className="flex items-center gap-2 font-bold">
+            <Code className="h-6 w-6" />
+            <span>InterviewAI</span>
+          </div>
+          <nav className="hidden md:flex gap-6">
+            <Link className="text-sm font-medium hover:underline underline-offset-4" href="#">
+              Features
+            </Link>
+            <Link className="text-sm font-medium hover:underline underline-offset-4" href="#">
+              Pricing
+            </Link>
+            <Link className="text-sm font-medium hover:underline underline-offset-4" href="#">
+              About
+            </Link>
+          </nav>
+          <div className="flex items-center gap-4">
+            <Link href="/sign-in">
+              <Button variant="outline">Sign In</Button>
+            </Link>
+            <Link href="/sign-up">
+              <Button>Sign Up</Button>
+            </Link>
+          </div>
+        </div>
+      </header>
+      <main className="flex-1">
+        <section className="w-full py-12 md:py-24 lg:py-32 bg-gradient-to-b from-white to-gray-100 dark:from-gray-900 dark:to-gray-800">
+          <div className="container px-4 md:px-6">
+            <div className="grid gap-6 lg:grid-cols-2 lg:gap-12 xl:grid-cols-2">
+              <div className="flex flex-col justify-center space-y-4">
+                <div className="space-y-2">
+                  <h1 className="text-3xl font-bold tracking-tighter sm:text-5xl xl:text-6xl/none">
+                    Ace Your Next Tech Interview with AI
+                  </h1>
+                  <p className="max-w-[600px] text-gray-500 md:text-xl dark:text-gray-400">
+                    Practice with our AI-powered mock interviews. Get real-time feedback and improve your skills.
+                  </p>
+                </div>
+                <div className="flex flex-col gap-2 min-[400px]:flex-row">
+                  <Link href="/dashboard">
+                    <Button size="lg" className="gap-2">
+                      Start Practicing
+                      <ArrowRight className="h-4 w-4" />
+                    </Button>
+                  </Link>
+                  <Link href="/how-it-works">
+                    <Button size="lg" variant="outline">
+                      How It Works
+                    </Button>
+                  </Link>
+                </div>
+              </div>
+              <div className="flex items-center justify-center">
+                <div className="relative w-full max-w-[500px] aspect-video rounded-xl overflow-hidden border bg-white dark:bg-gray-950 shadow-lg">
+                  <div className="absolute inset-0 bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20">
+                    <div className="p-6 h-full flex flex-col">
+                      <div className="flex items-center gap-2 mb-4">
+                        <div className="w-3 h-3 rounded-full bg-red-500" />
+                        <div className="w-3 h-3 rounded-full bg-yellow-500" />
+                        <div className="w-3 h-3 rounded-full bg-green-500" />
+                        <div className="ml-auto text-xs text-gray-500 dark:text-gray-400">Mock Interview</div>
+                      </div>
+                      <div className="flex-1 flex flex-col gap-4">
+                        <div className="bg-white dark:bg-gray-800 p-3 rounded-lg shadow-sm">
+                          <p className="text-sm font-medium">Interviewer AI:</p>
+                          <p className="text-sm text-gray-600 dark:text-gray-300">
+                            Can you explain how React's virtual DOM works and why it's beneficial?
+                          </p>
+                        </div>
+                        <div className="bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg shadow-sm self-end">
+                          <p className="text-sm font-medium">You:</p>
+                          <p className="text-sm text-gray-600 dark:text-gray-300">
+                            The virtual DOM is a lightweight copy of the actual DOM...
+                          </p>
+                        </div>
+                        <div className="mt-auto flex items-center gap-2">
+                          <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                          <span className="text-xs text-gray-500 dark:text-gray-400">AI is typing...</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section className="w-full py-12 md:py-24 lg:py-32">
+          <div className="container px-4 md:px-6">
+            <div className="flex flex-col items-center justify-center space-y-4 text-center">
+              <div className="space-y-2">
+                <h2 className="text-3xl font-bold tracking-tighter sm:text-4xl md:text-5xl">Features</h2>
+                <p className="max-w-[900px] text-gray-500 md:text-xl/relaxed lg:text-base/relaxed xl:text-xl/relaxed dark:text-gray-400">
+                  Everything you need to prepare for your technical interviews
+                </p>
+              </div>
+            </div>
+            <div className="mx-auto grid max-w-5xl items-center gap-6 py-12 lg:grid-cols-3 lg:gap-12">
+              <div className="flex flex-col items-center space-y-4 text-center">
+                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-blue-100 dark:bg-blue-900/20">
+                  <Briefcase className="h-8 w-8 text-blue-600 dark:text-blue-400" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-xl font-bold">Role-specific Questions</h3>
+                  <p className="text-gray-500 dark:text-gray-400">
+                    Practice with questions tailored to your target role and experience level.
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-col items-center space-y-4 text-center">
+                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-blue-100 dark:bg-blue-900/20">
+                  <CheckCircle className="h-8 w-8 text-blue-600 dark:text-blue-400" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-xl font-bold">Real-time Feedback</h3>
+                  <p className="text-gray-500 dark:text-gray-400">
+                    Get instant feedback on your answers with suggestions for improvement.
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-col items-center space-y-4 text-center">
+                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-blue-100 dark:bg-blue-900/20">
+                  <Clock className="h-8 w-8 text-blue-600 dark:text-blue-400" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-xl font-bold">Progress Tracking</h3>
+                  <p className="text-gray-500 dark:text-gray-400">
+                    Monitor your improvement over time with detailed performance analytics.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+      <footer className="border-t">
+        <div className="container flex flex-col gap-4 py-10 md:flex-row md:gap-8 md:py-12">
+          <div className="flex-1 space-y-4">
+            <div className="flex items-center gap-2 font-bold">
+              <Code className="h-6 w-6" />
+              <span>InterviewAI</span>
+            </div>
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              AI-powered mock interviews to help you land your dream job.
+            </p>
+          </div>
+          <div className="grid flex-1 grid-cols-2 gap-8 sm:grid-cols-3">
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium">Product</h3>
+              <ul className="space-y-2 text-sm">
+                <li>
+                  <Link className="text-gray-500 hover:underline dark:text-gray-400" href="#">
+                    Features
+                  </Link>
+                </li>
+                <li>
+                  <Link className="text-gray-500 hover:underline dark:text-gray-400" href="#">
+                    Pricing
+                  </Link>
+                </li>
+                <li>
+                  <Link className="text-gray-500 hover:underline dark:text-gray-400" href="#">
+                    FAQ
+                  </Link>
+                </li>
+              </ul>
+            </div>
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium">Company</h3>
+              <ul className="space-y-2 text-sm">
+                <li>
+                  <Link className="text-gray-500 hover:underline dark:text-gray-400" href="#">
+                    About
+                  </Link>
+                </li>
+                <li>
+                  <Link className="text-gray-500 hover:underline dark:text-gray-400" href="#">
+                    Blog
+                  </Link>
+                </li>
+                <li>
+                  <Link className="text-gray-500 hover:underline dark:text-gray-400" href="#">
+                    Careers
+                  </Link>
+                </li>
+              </ul>
+            </div>
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium">Legal</h3>
+              <ul className="space-y-2 text-sm">
+                <li>
+                  <Link className="text-gray-500 hover:underline dark:text-gray-400" href="#">
+                    Privacy
+                  </Link>
+                </li>
+                <li>
+                  <Link className="text-gray-500 hover:underline dark:text-gray-400" href="#">
+                    Terms
+                  </Link>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+        <div className="container flex flex-col items-center justify-between gap-4 border-t py-6 md:h-16 md:flex-row md:py-0">
+          <p className="text-xs text-gray-500 dark:text-gray-400">© 2024 InterviewAI. All rights reserved.</p>
+          <div className="flex gap-4 text-sm text-gray-500 dark:text-gray-400">
+            <Link className="hover:underline" href="#">
+              Terms of Service
+            </Link>
+            <Link className="hover:underline" href="#">
+              Privacy
+            </Link>
+          </div>
+        </div>
+      </footer>
+    </div>
+  )
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\components\ui\card.tsx ===
+import * as React from "react"
+
+import { cn } from "@/lib/utils"
+
+const Card = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn(
+      "rounded-lg border bg-card text-card-foreground shadow-sm",
+      className
+    )}
+    {...props}
+  />
+))
+Card.displayName = "Card"
+
+const CardHeader = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("flex flex-col space-y-1.5 p-6", className)}
+    {...props}
+  />
+))
+CardHeader.displayName = "CardHeader"
+
+const CardTitle = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn(
+      "text-2xl font-semibold leading-none tracking-tight",
+      className
+    )}
+    {...props}
+  />
+))
+CardTitle.displayName = "CardTitle"
+
+const CardDescription = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("text-sm text-muted-foreground", className)}
+    {...props}
+  />
+))
+CardDescription.displayName = "CardDescription"
+
+const CardContent = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div ref={ref} className={cn("p-6 pt-0", className)} {...props} />
+))
+CardContent.displayName = "CardContent"
+
+const CardFooter = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("flex items-center p-6 pt-0", className)}
+    {...props}
+  />
+))
+CardFooter.displayName = "CardFooter"
+
+export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent }
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\components\ui\button.tsx ===
+import * as React from "react"
+import { Slot } from "@radix-ui/react-slot"
+import { cva, type VariantProps } from "class-variance-authority"
+
+import { cn } from "@/lib/utils"
+
+const buttonVariants = cva(
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  {
+    variants: {
+      variant: {
+        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        destructive:
+          "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+        outline:
+          "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
+        secondary:
+          "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        ghost: "hover:bg-accent hover:text-accent-foreground",
+        link: "text-primary underline-offset-4 hover:underline",
+      },
+      size: {
+        default: "h-10 px-4 py-2",
+        sm: "h-9 rounded-md px-3",
+        lg: "h-11 rounded-md px-8",
+        icon: "h-10 w-10",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+)
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean
+}
+
+const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : "button"
+    return (
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    )
+  }
+)
+Button.displayName = "Button"
+
+export { Button, buttonVariants }
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\hooks\use-mobile.tsx ===
+import * as React from "react"
+
+const MOBILE_BREAKPOINT = 768
+
+export function useIsMobile() {
+  const [isMobile, setIsMobile] = React.useState<boolean | undefined>(undefined)
+
+  React.useEffect(() => {
+    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`)
+    const onChange = () => {
+      setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
+    }
+    mql.addEventListener("change", onChange)
+    setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
+    return () => mql.removeEventListener("change", onChange)
+  }, [])
+
+  return !!isMobile
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\hooks\use-toast.ts ===
+"use client"
+
+// Inspired by react-hot-toast library
+import * as React from "react"
+
+import type {
+  ToastActionElement,
+  ToastProps,
+} from "@/components/ui/toast"
+
+const TOAST_LIMIT = 1
+const TOAST_REMOVE_DELAY = 1000000
+
+type ToasterToast = ToastProps & {
+  id: string
+  title?: React.ReactNode
+  description?: React.ReactNode
+  action?: ToastActionElement
+}
+
+const actionTypes = {
+  ADD_TOAST: "ADD_TOAST",
+  UPDATE_TOAST: "UPDATE_TOAST",
+  DISMISS_TOAST: "DISMISS_TOAST",
+  REMOVE_TOAST: "REMOVE_TOAST",
+} as const
+
+let count = 0
+
+function genId() {
+  count = (count + 1) % Number.MAX_SAFE_INTEGER
+  return count.toString()
+}
+
+type ActionType = typeof actionTypes
+
+type Action =
+  | {
+      type: ActionType["ADD_TOAST"]
+      toast: ToasterToast
+    }
+  | {
+      type: ActionType["UPDATE_TOAST"]
+      toast: Partial<ToasterToast>
+    }
+  | {
+      type: ActionType["DISMISS_TOAST"]
+      toastId?: ToasterToast["id"]
+    }
+  | {
+      type: ActionType["REMOVE_TOAST"]
+      toastId?: ToasterToast["id"]
+    }
+
+interface State {
+  toasts: ToasterToast[]
+}
+
+const toastTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+
+const addToRemoveQueue = (toastId: string) => {
+  if (toastTimeouts.has(toastId)) {
+    return
+  }
+
+  const timeout = setTimeout(() => {
+    toastTimeouts.delete(toastId)
+    dispatch({
+      type: "REMOVE_TOAST",
+      toastId: toastId,
+    })
+  }, TOAST_REMOVE_DELAY)
+
+  toastTimeouts.set(toastId, timeout)
+}
+
+export const reducer = (state: State, action: Action): State => {
+  switch (action.type) {
+    case "ADD_TOAST":
+      return {
+        ...state,
+        toasts: [action.toast, ...state.toasts].slice(0, TOAST_LIMIT),
+      }
+
+    case "UPDATE_TOAST":
+      return {
+        ...state,
+        toasts: state.toasts.map((t) =>
+          t.id === action.toast.id ? { ...t, ...action.toast } : t
+        ),
+      }
+
+    case "DISMISS_TOAST": {
+      const { toastId } = action
+
+      // ! Side effects ! - This could be extracted into a dismissToast() action,
+      // but I'll keep it here for simplicity
+      if (toastId) {
+        addToRemoveQueue(toastId)
+      } else {
+        state.toasts.forEach((toast) => {
+          addToRemoveQueue(toast.id)
+        })
+      }
+
+      return {
+        ...state,
+        toasts: state.toasts.map((t) =>
+          t.id === toastId || toastId === undefined
+            ? {
+                ...t,
+                open: false,
+              }
+            : t
+        ),
+      }
+    }
+    case "REMOVE_TOAST":
+      if (action.toastId === undefined) {
+        return {
+          ...state,
+          toasts: [],
+        }
+      }
+      return {
+        ...state,
+        toasts: state.toasts.filter((t) => t.id !== action.toastId),
+      }
+  }
+}
+
+const listeners: Array<(state: State) => void> = []
+
+let memoryState: State = { toasts: [] }
+
+function dispatch(action: Action) {
+  memoryState = reducer(memoryState, action)
+  listeners.forEach((listener) => {
+    listener(memoryState)
+  })
+}
+
+type Toast = Omit<ToasterToast, "id">
+
+function toast({ ...props }: Toast) {
+  const id = genId()
+
+  const update = (props: ToasterToast) =>
+    dispatch({
+      type: "UPDATE_TOAST",
+      toast: { ...props, id },
+    })
+  const dismiss = () => dispatch({ type: "DISMISS_TOAST", toastId: id })
+
+  dispatch({
+    type: "ADD_TOAST",
+    toast: {
+      ...props,
+      id,
+      open: true,
+      onOpenChange: (open) => {
+        if (!open) dismiss()
+      },
+    },
+  })
+
+  return {
+    id: id,
+    dismiss,
+    update,
+  }
+}
+
+function useToast() {
+  const [state, setState] = React.useState<State>(memoryState)
+
+  React.useEffect(() => {
+    listeners.push(setState)
+    return () => {
+      const index = listeners.indexOf(setState)
+      if (index > -1) {
+        listeners.splice(index, 1)
+      }
+    }
+  }, [state])
+
+  return {
+    ...state,
+    toast,
+    dismiss: (toastId?: string) => dispatch({ type: "DISMISS_TOAST", toastId }),
+  }
+}
+
+export { useToast, toast }
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\lib\db.ts ===
+import { drizzle } from "drizzle-orm/postgres-js"
+import postgres from "postgres"
+import { pgTable, serial, text, timestamp, integer } from "drizzle-orm/pg-core"
+
+// Database schema
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  image: text("image"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+})
+
+export const interviews = pgTable("interviews", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id")
+    .references(() => users.id)
+    .notNull(),
+  title: text("title").notNull(),
+  type: text("type").notNull(),
+  topics: text("topics").array(),
+  score: integer("score"),
+  feedback: text("feedback"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+})
+
+export const messages = pgTable("messages", {
+  id: serial("id").primaryKey(),
+  interviewId: integer("interview_id")
+    .references(() => interviews.id)
+    .notNull(),
+  role: text("role").notNull(),
+  content: text("content").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+})
+
+// Database connection
+const connectionString = process.env.DATABASE_URL || ""
+const client = postgres(connectionString)
+export const db = drizzle(client)
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\lib\utils.ts ===
+import { clsx, type ClassValue } from "clsx"
+import { twMerge } from "tailwind-merge"
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\scripts\schema.sql ===
+-- Create users table
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE,
+  image TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Create interviews table
+CREATE TABLE IF NOT EXISTS interviews (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  title TEXT NOT NULL,
+  type TEXT NOT NULL,
+  topics TEXT[],
+  score INTEGER,
+  feedback TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Create messages table
+CREATE TABLE IF NOT EXISTS messages (
+  id SERIAL PRIMARY KEY,
+  interview_id INTEGER NOT NULL REFERENCES interviews(id),
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Insert sample data
+INSERT INTO users (name, email, image)
+VALUES 
+  ('John Doe', 'john@example.com', 'https://github.com/shadcn.png'),
+  ('Jane Smith', 'jane@example.com', 'https://github.com/shadcn.png');
+
+INSERT INTO interviews (user_id, title, type, topics, score)
+VALUES 
+  (1, 'Frontend Developer Interview', 'Frontend', ARRAY['React', 'TypeScript', 'CSS'], 85),
+  (1, 'System Design Interview', 'System Design', ARRAY['Architecture', 'Scalability', 'Database Design'], 72),
+  (1, 'Behavioral Interview', 'Behavioral', ARRAY['Leadership', 'Teamwork', 'Problem-solving'], 90);
+
+INSERT INTO messages (interview_id, role, content)
+VALUES 
+  (1, 'system', 'Welcome to your Frontend mock interview! I''ll be asking you technical questions about React, TypeScript, and CSS. Let''s get started!'),
+  (1, 'assistant', 'Can you explain how React''s virtual DOM works and why it''s beneficial for web applications?'),
+  (1, 'user', 'The virtual DOM is a lightweight copy of the actual DOM. When state changes in a React component, React first updates the virtual DOM rather than the browser''s DOM. Next, React compares the current virtual DOM with the previous one (diffing). Only the changed elements are updated in the real DOM. This approach is beneficial because manipulating the actual DOM is slow and inefficient, while JavaScript operations on the virtual DOM are much faster. This results in better performance and a smoother user experience, especially in complex applications with frequent updates.');
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\styles\globals.css ===
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96.1%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 0 0% 96.1%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 89.8%;
+    --input: 0 0% 89.8%;
+    --ring: 0 0% 3.9%;
+    --chart-1: 12 76% 61%;
+    --chart-2: 173 58% 39%;
+    --chart-3: 197 37% 24%;
+    --chart-4: 43 74% 66%;
+    --chart-5: 27 87% 67%;
+    --radius: 0.5rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+  .dark {
+    --background: 0 0% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 0 0% 14.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 0 0% 83.1%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\.env.example ===
+# =============================================================================
+# AI MOCK INTERVIEW APPLICATION - ENVIRONMENT VARIABLES
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DATABASE CONFIGURATION
+# -----------------------------------------------------------------------------
+# PostgreSQL Database Connection String
+# 
+# 🔗 Get your database URL from:
+# • Neon: https://neon.tech/ (Recommended - Free tier available)
+# • Supabase: https://supabase.com/dashboard/projects
+# • Railway: https://railway.app/
+# • PlanetScale: https://planetscale.com/
+# • Vercel Postgres: https://vercel.com/storage/postgres
+#
+# Format: postgresql://username:password@host:port/database_name
+DATABASE_URL="postgresql://username:password@ep-example-123456.us-east-1.aws.neon.tech/neondb"
+
+# -----------------------------------------------------------------------------
+# AI API CONFIGURATION
+# -----------------------------------------------------------------------------
+# Google Gemini AI API Key
+# 
+# 🔗 Get your API key from: https://makersuite.google.com/app/apikey
+# 📚 Documentation: https://ai.google.dev/gemini-api/docs/api-key
+# 💰 Pricing: https://ai.google.dev/pricing
+# 
+# Steps to get API key:
+# 1. Go to Google AI Studio
+# 2. Sign in with your Google account
+# 3. Click "Get API key"
+# 4. Create new project or select existing
+# 5. Copy the generated API key
+GEMINI_API_KEY="AIzaSyC-your_actual_gemini_api_key_here"
+
+# -----------------------------------------------------------------------------
+# EMAIL CONFIGURATION (For Video Recording Feature)
+# -----------------------------------------------------------------------------
+# Gmail Account for Sending Interview Recordings
+# 
+# 🔗 Gmail App Passwords: https://support.google.com/accounts/answer/185833
+# 📚 Setup Guide: https://support.google.com/mail/answer/185833?hl=en
+#
+# IMPORTANT: Use App Password, NOT your regular Gmail password!
+# 
+# Steps to setup Gmail App Password:
+# 1. Go to https://myaccount.google.com/security
+# 2. Enable 2-Step Verification if not already enabled
+# 3. Go to "App passwords" section
+# 4. Select "Mail" and "Other (custom name)"
+# 5. Enter "AI Mock Interview" as the app name
+# 6. Copy the 16-character password generated
+EMAIL_USER="saisagardunna04@gmail.com"
+EMAIL_PASSWORD="Saisagar@123"  # 16-character app password from Google
+
+# Alternative Email Services (if not using Gmail):
+# 
+# 🔗 Outlook/Hotmail: https://support.microsoft.com/en-us/office/pop-imap-and-smtp-settings-8361e398-8af4-4e97-b147-6c6c4ac95353
+# 🔗 Yahoo Mail: https://help.yahoo.com/kb/SLN4724.html
+# 🔗 SendGrid: https://sendgrid.com/ (For production use)
+# 🔗 Mailgun: https://www.mailgun.com/ (For production use)
+# 🔗 AWS SES: https://aws.amazon.com/ses/ (For production use)
+
+# SMTP Configuration (Advanced - only if using custom email service)
+SMTP_HOST="smtp.gmail.com"
+SMTP_PORT="587"
+SMTP_SECURE="false"  # true for 465, false for other ports
+
+# -----------------------------------------------------------------------------
+# AUTHENTICATION (Optional - for user management)
+# -----------------------------------------------------------------------------
+# Clerk Authentication Service
+# 
+# 🔗 Clerk Dashboard: https://dashboard.clerk.com/
+# 📚 Next.js Setup Guide: https://clerk.com/docs/quickstarts/nextjs
+# 💰 Pricing: https://clerk.com/pricing (Free tier: 10,000 MAUs)
+#
+# Steps to setup Clerk:
+# 1. Sign up at https://clerk.com/
+# 2. Create new application
+# 3. Choose "Next.js" as framework
+# 4. Copy the API keys from dashboard
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="pk_test_your_clerk_publishable_key_here"
+CLERK_SECRET_KEY="sk_test_your_clerk_secret_key_here"
+
+# Alternative Authentication Services:
+# 🔗 NextAuth.js: https://next-auth.js.org/ (Free, self-hosted)
+# 🔗 Auth0: https://auth0.com/ (Free tier: 7,000 MAUs)
+# 🔗 Firebase Auth: https://firebase.google.com/products/auth (Free tier generous)
+# 🔗 Supabase Auth: https://supabase.com/auth (Free tier: 50,000 MAUs)
+
+# -----------------------------------------------------------------------------
+# APPLICATION CONFIGURATION
+# -----------------------------------------------------------------------------
+# Next.js Application URL
+NEXT_PUBLIC_APP_URL="http://localhost:3000"  # Change to your domain in production
+
+# Session Configuration
+SESSION_SECRET="your_super_secret_session_key_here_min_32_characters"
+SESSION_MAX_AGE="86400"  # 24 hours in seconds
+
+# -----------------------------------------------------------------------------
+# FILE UPLOAD & STORAGE (Optional)
+# -----------------------------------------------------------------------------
+# File Upload Limits
+MAX_FILE_SIZE="50MB"
+ALLOWED_FILE_TYPES="video/webm,video/mp4,audio/wav,audio/mp3"
+
+# Cloud Storage (Optional - for storing interview recordings)
+# 
+# 🔗 Vercel Blob: https://vercel.com/storage/blob
+# 🔗 AWS S3: https://aws.amazon.com/s3/
+# 🔗 Google Cloud Storage: https://cloud.google.com/storage
+# 🔗 Cloudinary: https://cloudinary.com/ (Great for video processing)
+BLOB_READ_WRITE_TOKEN="vercel_blob_token_here"  # If using Vercel Blob
+
+# -----------------------------------------------------------------------------
+# RATE LIMITING & SECURITY
+# -----------------------------------------------------------------------------
+# API Rate Limiting
+RATE_LIMIT_MAX_REQUESTS="100"      # Max requests per window
+RATE_LIMIT_WINDOW_MS="900000"      # 15 minutes in milliseconds
+
+# CORS Configuration
+ALLOWED_ORIGINS="http://localhost:3000,https://yourdomain.com"
+
+# -----------------------------------------------------------------------------
+# MONITORING & ANALYTICS (Optional)
+# -----------------------------------------------------------------------------
+# Logging Configuration
+LOG_LEVEL="info"  # error, warn, info, debug
+LOG_FILE_PATH="./logs/app.log"
+
+# Analytics Services
+# 
+# 🔗 Vercel Analytics: https://vercel.com/analytics
+# 🔗 Google Analytics: https://analytics.google.com/
+# 🔗 Mixpanel: https://mixpanel.com/
+# 🔗 PostHog: https://posthog.com/
+NEXT_PUBLIC_VERCEL_ANALYTICS_ID="your_vercel_analytics_id"
+NEXT_PUBLIC_GA_MEASUREMENT_ID="G-XXXXXXXXXX"  # Google Analytics 4
+
+# Error Tracking
+# 
+# 🔗 Sentry: https://sentry.io/
+# 🔗 Bugsnag: https://www.bugsnag.com/
+# 🔗 LogRocket: https://logrocket.com/
+SENTRY_DSN="https://your_sentry_dsn_here@sentry.io/project_id"
+
+# -----------------------------------------------------------------------------
+# THIRD-PARTY INTEGRATIONS (Optional)
+# -----------------------------------------------------------------------------
+# Video Processing Services
+# 
+# 🔗 Mux: https://mux.com/ (Video streaming and processing)
+# 🔗 Cloudinary: https://cloudinary.com/ (Media management)
+# 🔗 AWS Transcribe: https://aws.amazon.com/transcribe/ (Speech-to-text)
+MUX_TOKEN_ID="your_mux_token_id"
+MUX_TOKEN_SECRET="your_mux_token_secret"
+
+# Speech Recognition Services
+# 
+# 🔗 Google Speech-to-Text: https://cloud.google.com/speech-to-text
+# 🔗 Azure Speech Services: https://azure.microsoft.com/en-us/products/cognitive-services/speech-services/
+# 🔗 AWS Transcribe: https://aws.amazon.com/transcribe/
+GOOGLE_SPEECH_API_KEY="your_google_speech_api_key"
+
+# -----------------------------------------------------------------------------
+# DEVELOPMENT & TESTING
+# -----------------------------------------------------------------------------
+# Development Environment
+NODE_ENV="development"  # development, production, test
+
+# Test Database (Optional - for running tests)
+TEST_DATABASE_URL="postgresql://test_user:test_pass@localhost:5432/test_db"
+
+# Feature Flags
+ENABLE_VIDEO_RECORDING="true"
+ENABLE_AI_FEEDBACK="true"
+ENABLE_EMAIL_NOTIFICATIONS="true"
+ENABLE_ANALYTICS="false"
+
+# -----------------------------------------------------------------------------
+# PRODUCTION DEPLOYMENT
+# -----------------------------------------------------------------------------
+# When deploying to production, update these values:
+# 
+# 🔗 Vercel: https://vercel.com/docs/concepts/projects/environment-variables
+# 🔗 Netlify: https://docs.netlify.com/configure-builds/environment-variables/
+# 🔗 Railway: https://docs.railway.app/develop/variables
+# 🔗 Heroku: https://devcenter.heroku.com/articles/config-vars
+#
+# NEXT_PUBLIC_APP_URL="https://yourdomain.com"
+# NODE_ENV="production"
+# DATABASE_URL="your_production_database_url"
+
+# =============================================================================
+# SETUP CHECKLIST
+# =============================================================================
+# 
+# ✅ 1. Copy this file to .env.local
+# ✅ 2. Get Neon database URL and update DATABASE_URL
+# ✅ 3. Get Gemini API key and update GEMINI_API_KEY  
+# ✅ 4. Setup Gmail app password and update EMAIL_USER/EMAIL_PASSWORD
+# ✅ 5. (Optional) Setup Clerk auth and update CLERK keys
+# ✅ 6. Update NEXT_PUBLIC_APP_URL to your domain
+# ✅ 7. Generate a secure SESSION_SECRET (32+ characters)
+# ✅ 8. Run: npm install
+# ✅ 9. Run: npm run dev
+# ✅ 10. Test the application!
+#
+# =============================================================================
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\middleware.ts ===
+import { NextResponse } from "next/server"
+import type { NextRequest } from "next/server"
+
+export function middleware(request: NextRequest) {
+  // For now, just allow all requests to pass through
+  return NextResponse.next()
+}
+
+export const config = {
+  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\next-env.d.ts ===
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+
+// NOTE: This file should not be edited
+// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\next.config.mjs ===
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
+  typescript: {
+    ignoreBuildErrors: true,
+  },
+  images: {
+    unoptimized: true,
+  },
+}
+
+export default nextConfig
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\package.json ===
+{
+  "name": "ai-mock-interview",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@radix-ui/react-accordion": "^1.2.1",
+    "@radix-ui/react-alert-dialog": "^1.1.2",
+    "@radix-ui/react-avatar": "^1.1.1",
+    "@radix-ui/react-checkbox": "^1.1.2",
+    "@radix-ui/react-dialog": "^1.1.2",
+    "@radix-ui/react-dropdown-menu": "^2.1.2",
+    "@radix-ui/react-label": "^2.1.0",
+    "@radix-ui/react-radio-group": "^1.2.1",
+    "@radix-ui/react-select": "^2.1.2",
+    "@radix-ui/react-separator": "^1.1.0",
+    "@radix-ui/react-slot": "^1.1.0",
+    "@radix-ui/react-tabs": "^1.1.1",
+    "@radix-ui/react-toast": "^1.2.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "drizzle-orm": "^0.36.4",
+    "lucide-react": "^0.468.0",
+    "next": "15.1.3",
+    "nodemailer": "^6.9.16",
+    "postgres": "^3.4.5",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^2.5.4",
+    "tailwindcss-animate": "^1.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/nodemailer": "^6.4.19",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "drizzle-kit": "^0.28.1",
+    "eslint": "^9.17.0",
+    "eslint-config-next": "15.1.3",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2"
+  }
+}
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\tailwind.config.ts ===
+import type { Config } from "tailwindcss";
+
+const config: Config = {
+    darkMode: ["class"],
+    content: [
+    "./pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./app/**/*.{js,ts,jsx,tsx,mdx}",
+    "*.{js,ts,jsx,tsx,mdx}"
+  ],
+  theme: {
+  	extend: {
+  		colors: {
+  			background: 'hsl(var(--background))',
+  			foreground: 'hsl(var(--foreground))',
+  			card: {
+  				DEFAULT: 'hsl(var(--card))',
+  				foreground: 'hsl(var(--card-foreground))'
+  			},
+  			popover: {
+  				DEFAULT: 'hsl(var(--popover))',
+  				foreground: 'hsl(var(--popover-foreground))'
+  			},
+  			primary: {
+  				DEFAULT: 'hsl(var(--primary))',
+  				foreground: 'hsl(var(--primary-foreground))'
+  			},
+  			secondary: {
+  				DEFAULT: 'hsl(var(--secondary))',
+  				foreground: 'hsl(var(--secondary-foreground))'
+  			},
+  			muted: {
+  				DEFAULT: 'hsl(var(--muted))',
+  				foreground: 'hsl(var(--muted-foreground))'
+  			},
+  			accent: {
+  				DEFAULT: 'hsl(var(--accent))',
+  				foreground: 'hsl(var(--accent-foreground))'
+  			},
+  			destructive: {
+  				DEFAULT: 'hsl(var(--destructive))',
+  				foreground: 'hsl(var(--destructive-foreground))'
+  			},
+  			border: 'hsl(var(--border))',
+  			input: 'hsl(var(--input))',
+  			ring: 'hsl(var(--ring))',
+  			chart: {
+  				'1': 'hsl(var(--chart-1))',
+  				'2': 'hsl(var(--chart-2))',
+  				'3': 'hsl(var(--chart-3))',
+  				'4': 'hsl(var(--chart-4))',
+  				'5': 'hsl(var(--chart-5))'
+  			},
+  			sidebar: {
+  				DEFAULT: 'hsl(var(--sidebar-background))',
+  				foreground: 'hsl(var(--sidebar-foreground))',
+  				primary: 'hsl(var(--sidebar-primary))',
+  				'primary-foreground': 'hsl(var(--sidebar-primary-foreground))',
+  				accent: 'hsl(var(--sidebar-accent))',
+  				'accent-foreground': 'hsl(var(--sidebar-accent-foreground))',
+  				border: 'hsl(var(--sidebar-border))',
+  				ring: 'hsl(var(--sidebar-ring))'
+  			}
+  		},
+  		borderRadius: {
+  			lg: 'var(--radius)',
+  			md: 'calc(var(--radius) - 2px)',
+  			sm: 'calc(var(--radius) - 4px)'
+  		},
+  		keyframes: {
+  			'accordion-down': {
+  				from: {
+  					height: '0'
+  				},
+  				to: {
+  					height: 'var(--radix-accordion-content-height)'
+  				}
+  			},
+  			'accordion-up': {
+  				from: {
+  					height: 'var(--radix-accordion-content-height)'
+  				},
+  				to: {
+  					height: '0'
+  				}
+  			}
+  		},
+  		animation: {
+  			'accordion-down': 'accordion-down 0.2s ease-out',
+  			'accordion-up': 'accordion-up 0.2s ease-out'
+  		}
+  	}
+  },
+  plugins: [require("tailwindcss-animate")],
+};
+export default config;
+
+
+=== File: C:\Users\saisagar\Downloads\ai-mock-interview (1)\tsconfig.json ===
+{
+  "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "target": "ES6",
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
